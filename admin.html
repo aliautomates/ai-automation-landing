@@ -322,6 +322,16 @@
         <div class="panel" style="display:grid;gap:12px;max-width:880px">
           <div class="sub">Answers use a business-level pipeline summary only. The assistant cannot see passwords, API keys, auth data or individual personal details.</div>
           <div id="agentLog" style="display:grid;gap:10px;min-height:120px"></div>
+          <div style="display:grid;gap:10px;border-top:1px solid var(--line);padding-top:12px">
+            <div class="kicker">Chart or screenshot analysis</div>
+            <input id="imgFile" type="file" accept="image/png,image/jpeg,image/webp" aria-label="Chart or screenshot image" />
+            <input id="imgQ" maxlength="500" placeholder="Optional question, e.g. What is the lead trend this month?" aria-label="Question about the image" />
+            <div><button class="btn primary small" id="imgBtn" type="button">Analyze image</button></div>
+          </div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+            <button class="btn small" id="healthBtn" type="button">Check AI keys and models</button>
+            <span class="muted" id="healthOut"></span>
+          </div>
           <form id="agentForm" style="display:flex;gap:10px;flex-wrap:wrap">
             <input id="agentInput" maxlength="1000" placeholder="e.g. Which leads should I contact first this week?" aria-label="Question for the assistant" style="flex:1;min-width:220px" />
             <button class="btn primary small" type="submit">Ask</button>
@@ -811,6 +821,43 @@
         } catch (err) { bubble('Assistant', 'Could not answer: ' + err.message); }
       }
       $('agentForm').addEventListener('submit', askAgent);
+      async function analyzeImage() {
+        var f = $('imgFile').files && $('imgFile').files[0];
+        if (!f) { toast('Choose an image first'); return; }
+        if (f.size > 3 * 1024 * 1024) { toast('Image is over 3 MB'); return; }
+        var q = $('imgQ').value.trim();
+        $('imgBtn').disabled = true;
+        bubble('You', 'Analyze image: ' + f.name + (q ? ' - ' + q : ''));
+        try {
+          var dataUrl = await new Promise(function (res, rej) {
+            var r = new FileReader();
+            r.onload = function () { res(r.result); };
+            r.onerror = rej;
+            r.readAsDataURL(f);
+          });
+          var out = await callFn({ action: 'analyze_image', image: dataUrl, question: q || undefined });
+          bubble('Assistant', out.answer || 'No answer.');
+        } catch (e) { bubble('Assistant', 'Image analysis failed: ' + e.message); }
+        finally { $('imgBtn').disabled = false; }
+      }
+      async function checkKeys() {
+        $('healthBtn').disabled = true;
+        $('healthOut').textContent = 'Checking...';
+        try {
+          var out = await callFn({ action: 'health' });
+          var keys = (out.keys || []).map(function (k) {
+            var label = k.name.replace('GROQ_API_KEY', 'key');
+            return label + ': ' + (!k.configured ? 'not set' : (k.ok ? 'ok' : 'failed (' + k.status + ')'));
+          }).join(' | ');
+          var t = out.text_model || {}, v = out.vision_model || {};
+          $('healthOut').textContent = keys + ' || text model: ' + (t.ok ? 'ok' : 'failed') + ', vision model: ' + (v.ok ? 'ok' : 'failed');
+          if (!t.ok) bubble('Assistant', 'Text model error: ' + (t.error || 'unknown'));
+          if (!v.ok) bubble('Assistant', 'Vision model error: ' + (v.error || 'unknown'));
+        } catch (e) { $('healthOut').textContent = 'Check failed: ' + e.message; }
+        finally { $('healthBtn').disabled = false; }
+      }
+      $('imgBtn').addEventListener('click', analyzeImage);
+      $('healthBtn').addEventListener('click', checkKeys);
 
       // ---------- navigation ----------
       function go(view) {
