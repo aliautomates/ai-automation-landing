@@ -247,6 +247,8 @@
         <button data-view="pipeline">Pipeline <span class="count" id="cPipe">0</span></button>
         <button data-view="finder">Lead finder</button>
         <button data-view="automations">Automations <span class="count" id="cAuto">0</span></button>
+        <button data-view="discover">Business finder</button>
+        <button data-view="assistant">AI assistant</button>
         <button data-view="settings">Settings</button>
       </nav>
       <div class="foot">Signed in with two-factor authentication.</div>
@@ -295,6 +297,36 @@
           <span class="spacer"></span><span class="muted">Change a stage with the menu on each card.</span>
         </div>
         <div class="board" id="board"></div>
+      </section>
+
+      <!-- DISCOVER (business finder) -->
+      <section class="view hidden" data-panel="discover">
+        <div class="page-head"><div><div class="kicker">Find clients</div><h2>Business <i>finder</i></h2></div></div>
+        <div class="panel" style="display:grid;gap:12px;margin-bottom:16px">
+          <div class="sub">Public business listings from Google Maps only: name, website, phone and address. No personal profiles and no social accounts. Check each business before you contact it.</div>
+          <div class="toolbar" style="margin:0">
+            <input id="findQuery" placeholder="Business type, e.g. dentist, real estate, restaurant" aria-label="Business type" />
+            <input id="findLoc" placeholder="City, e.g. Lahore, Pakistan" aria-label="Location" />
+            <select id="findLimit" aria-label="How many results"><option value="10">10 results</option><option value="20" selected>20 results</option><option value="50">50 results</option></select>
+            <button class="btn primary small" id="findBtn" type="button">Find businesses</button>
+            <button class="btn small" id="qualifyBtn" type="button">AI qualify</button>
+          </div>
+          <div id="findMsg" class="msg hidden" role="status"></div>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th>Business</th><th>Website</th><th>Phone</th><th>Address</th><th>Rating</th><th>AI fit and template</th><th></th></tr></thead><tbody id="findRows"></tbody></table><div class="empty" id="findEmpty">Search to see businesses here.</div></div>
+      </section>
+
+      <!-- ASSISTANT (AI agent) -->
+      <section class="view hidden" data-panel="assistant">
+        <div class="page-head"><div><div class="kicker">AI agent</div><h2>Ask the <i>assistant</i></h2></div></div>
+        <div class="panel" style="display:grid;gap:12px;max-width:880px">
+          <div class="sub">Answers use a business-level pipeline summary only. The assistant cannot see passwords, API keys, auth data or individual personal details.</div>
+          <div id="agentLog" style="display:grid;gap:10px;min-height:120px"></div>
+          <form id="agentForm" style="display:flex;gap:10px;flex-wrap:wrap">
+            <input id="agentInput" maxlength="1000" placeholder="e.g. Which leads should I contact first this week?" aria-label="Question for the assistant" style="flex:1;min-width:220px" />
+            <button class="btn primary small" type="submit">Ask</button>
+          </form>
+        </div>
       </section>
 
       <!-- LEAD FINDER -->
@@ -657,6 +689,128 @@
         $('cPipe').textContent = state.leads.filter(function (l) { return CLOSED.indexOf(l.stage) === -1; }).length;
         $('cAuto').textContent = state.autos.filter(function (a) { return a.enabled; }).length;
       }
+
+      // ---------- discover: business finder (Apify via lead-finder edge function) ----------
+      var FN_URL = SUPABASE_URL + '/functions/v1/lead-finder';
+      var found = [];
+      async function callFn(body) {
+        var s = await sb.auth.getSession();
+        var token = (s.data && s.data.session) ? s.data.session.access_token : '';
+        var res = await fetch(FN_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + token },
+          body: JSON.stringify(body)
+        });
+        var out = await res.json().catch(function () { return {}; });
+        if (!res.ok) throw new Error(out.error || ('HTTP ' + res.status));
+        return out;
+      }
+      function copyText(t) {
+        try { navigator.clipboard.writeText(t).then(function () { toast('Template copied'); }, function () { toast('Copy failed'); }); }
+        catch (e) { toast('Copy failed'); }
+      }
+      function renderFound() {
+        var tb = $('findRows'); tb.replaceChildren();
+        show($('findEmpty'), found.length === 0);
+        found.forEach(function (f) {
+          var ai = f.ai;
+          var fit = ai
+            ? h('div', null, [
+                h('span', { cls: 'score', text: String(ai.score) }),
+                h('div', { cls: 'muted', text: ai.reason || '' }),
+                h('pre', { text: ai.template || '' }),
+                h('button', { cls: 'btn small', type: 'button', text: 'Copy template', on: { click: function () { copyText(ai.template || ''); } } })
+              ])
+            : h('span', { cls: 'muted', text: 'Not scored yet' });
+          tb.appendChild(h('tr', null, [
+            h('td', null, [h('b', { text: f.company }), h('div', { cls: 'muted', text: f.category || '' })]),
+            h('td', { text: f.website || '—' }),
+            h('td', { text: f.phone || '—' }),
+            h('td', { text: f.address || '—' }),
+            h('td', { text: f.rating ? (f.rating + ' (' + (f.reviews || 0) + ')') : '—' }),
+            h('td', null, [fit]),
+            h('td', null, [h('button', { cls: 'btn small primary', type: 'button', text: 'Add lead', on: { click: function () { addFoundLead(f); } } })])
+          ]));
+        });
+      }
+      async function findBusinesses() {
+        var q = $('findQuery').value.trim(), loc = $('findLoc').value.trim();
+        var lim = Number($('findLimit').value) || 20;
+        if (q.length < 2 || loc.length < 2) { setMsg($('findMsg'), 'Enter a business type and a city first.'); return; }
+        setMsg($('findMsg'), 'Searching public Google Maps listings. This can take up to a minute…', 'ok');
+        $('findBtn').disabled = true;
+        try {
+          var out = await callFn({ action: 'find', query: q, location: loc, limit: lim });
+          found = out.results || [];
+          renderFound();
+          setMsg($('findMsg'), found.length + ' businesses found. Run AI qualify to score them.', 'ok');
+        } catch (e) { setMsg($('findMsg'), 'Search failed: ' + e.message); }
+        finally { $('findBtn').disabled = false; }
+      }
+      async function qualifyFound() {
+        var batch = found.slice(0, 20);
+        if (!batch.length) { setMsg($('findMsg'), 'Find businesses first.'); return; }
+        setMsg($('findMsg'), 'Scoring with AI…', 'ok');
+        $('qualifyBtn').disabled = true;
+        try {
+          var out = await callFn({
+            action: 'qualify', icp: state.icp,
+            leads: batch.map(function (f) { return { company: f.company, category: f.category, website: f.website, address: f.address, rating: f.rating }; })
+          });
+          (out.leads || []).forEach(function (q) {
+            var m = batch.find(function (f) { return f.company.toLowerCase() === String(q.company || '').toLowerCase(); });
+            if (m) m.ai = q;
+          });
+          found.sort(function (a, b) { return ((b.ai && b.ai.score) || 0) - ((a.ai && a.ai.score) || 0); });
+          renderFound();
+          setMsg($('findMsg'), 'Scores ready. Sorted by best fit.', 'ok');
+        } catch (e) { setMsg($('findMsg'), 'AI step failed: ' + e.message); }
+        finally { $('qualifyBtn').disabled = false; }
+      }
+      async function addFoundLead(f) {
+        var market = /pakistan/i.test(f.address || '') ? 'pakistan' : 'international';
+        var lead = {
+          company: f.company, website: f.website || null, industry: f.category || null, market: market,
+          source: 'public listing', contact_basis: 'Public business listing', est_value: 0,
+          notes: f.maps_url ? ('Source: ' + f.maps_url) : null, stage: 'new', tags: []
+        };
+        lead.score = scoreLead(lead, state.icp).score;
+        var r = await sb.from('leads').insert(lead).select().single();
+        if (r.error) { toast('Could not add: ' + r.error.message); return; }
+        state.leads.unshift(r.data);
+        refreshAll();
+        toast('Lead added');
+      }
+      $('findBtn').addEventListener('click', findBusinesses);
+      $('qualifyBtn').addEventListener('click', qualifyFound);
+
+      // ---------- assistant (AI agent, business-level context only) ----------
+      function bubble(who, text) {
+        var log = $('agentLog');
+        var b = h('div', { cls: 'act' }, [h('small', { text: who }), h('div', { text: text })]);
+        log.appendChild(b);
+        b.scrollIntoView({ block: 'nearest' });
+      }
+      async function askAgent(e) {
+        e.preventDefault();
+        var q = $('agentInput').value.trim();
+        if (!q) return;
+        $('agentInput').value = '';
+        bubble('You', q);
+        var ctx = {
+          new_enquiries: state.subs.filter(function (s) { return s.status === 'new'; }).length,
+          open_leads: state.leads.filter(function (l) { return CLOSED.indexOf(l.stage) === -1; }).length,
+          stage_counts: STAGES.map(function (s) { return s.label + ': ' + state.leads.filter(function (l) { return l.stage === s.id; }).length; }),
+          top_leads: state.leads.slice().sort(function (a, b) { return (b.score || 0) - (a.score || 0); }).slice(0, 10)
+            .map(function (l) { return { company: l.company, stage: l.stage, score: l.score, value_usd: l.est_value }; }),
+          automations_on: state.autos.filter(function (a) { return a.enabled; }).map(function (a) { return a.name || a.title || 'automation'; })
+        };
+        try {
+          var out = await callFn({ action: 'agent', message: q, context: ctx });
+          bubble('Assistant', out.answer || 'No answer.');
+        } catch (err) { bubble('Assistant', 'Could not answer: ' + err.message); }
+      }
+      $('agentForm').addEventListener('submit', askAgent);
 
       // ---------- navigation ----------
       function go(view) {
